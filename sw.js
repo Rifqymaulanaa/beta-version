@@ -1,5 +1,6 @@
-const cacheName = 'ef-class-v2';
-const assets = ['./', './index.html', './logo.png', './favicon.png', './logo.gif', './logo-kampus.png', './manifest.json'];
+const VERSION = 'v2.1.0';
+const cacheName = `ef-class-${VERSION}`;
+const assets = ['./', './index1.html', './logo.png', './favicon.png', './logo.gif', './logo-kampus.png', './manifest.json'];
 
 self.addEventListener('install', e => {
     e.waitUntil(
@@ -8,10 +9,15 @@ self.addEventListener('install', e => {
 });
 
 self.addEventListener('activate', e => {
-    // Hapus cache lama agar update langsung aktif
+    // Hapus cache versi lama secara total saat ada versi baru (Versioning System)
     e.waitUntil(
         caches.keys().then(keys =>
-            Promise.all(keys.filter(k => k !== cacheName).map(k => caches.delete(k)))
+            Promise.all(keys.map(k => {
+                if (k !== cacheName) {
+                    console.log(`[Service Worker] Menghapus cache lama: ${k}`);
+                    return caches.delete(k);
+                }
+            }))
         ).then(() => self.clients.claim())
     );
 });
@@ -19,7 +25,20 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
     const url = new URL(e.request.url);
 
-    // Aset lokal: cache-first (muat instan dari cache)
+    // Update Force: Khusus index.html / index1.html kita gunakan Network-first
+    // agar selalu mendapatkan versi aplikasi yang terbaru jika ada koneksi
+    if (e.request.mode === 'navigate' || url.pathname.endsWith('index1.html') || url.pathname === '/') {
+        e.respondWith(
+            fetch(e.request).then(networkRes => {
+                const clone = networkRes.clone();
+                caches.open(cacheName).then(cache => cache.put(e.request, clone));
+                return networkRes;
+            }).catch(() => caches.match(e.request))
+        );
+        return;
+    }
+
+    // Aset lokal statis (logo, font, js/css yang di-cache): Cache-first
     if (url.origin === self.location.origin) {
         e.respondWith(
             caches.match(e.request).then(res => res || fetch(e.request).then(networkRes => {
@@ -31,7 +50,7 @@ self.addEventListener('fetch', e => {
         return;
     }
 
-    // Resource eksternal (Google Sheets, CDN): network-first
+    // Resource eksternal (Google Sheets, CDN fonts/lucide): Network-first
     e.respondWith(
         fetch(e.request).catch(() => caches.match(e.request))
     );
