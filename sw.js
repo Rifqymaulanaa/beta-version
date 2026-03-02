@@ -1,6 +1,6 @@
 const VERSION = 'v2.1.0';
 const cacheName = `ef-class-${VERSION}`;
-const assets = ['./', './index1.html', './logo.png', './favicon.png', './logo.gif', './logo-kampus.png', './manifest.json'];
+const assets = ['./', './index.html', './logo.png', './favicon.png', './logo.gif', './logo-kampus.png', './manifest.json'];
 
 self.addEventListener('install', e => {
     e.waitUntil(
@@ -25,9 +25,9 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
     const url = new URL(e.request.url);
 
-    // Update Force: Khusus index.html / index1.html kita gunakan Network-first
+    // Update Force: Khusus index.html / index.html kita gunakan Network-first
     // agar selalu mendapatkan versi aplikasi yang terbaru jika ada koneksi
-    if (e.request.mode === 'navigate' || url.pathname.endsWith('index1.html') || url.pathname === '/') {
+    if (e.request.mode === 'navigate' || url.pathname.endsWith('index.html') || url.pathname === '/') {
         e.respondWith(
             fetch(e.request).then(networkRes => {
                 const clone = networkRes.clone();
@@ -55,3 +55,4 @@ self.addEventListener('fetch', e => {
         fetch(e.request).catch(() => caches.match(e.request))
     );
 });
+
