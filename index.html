@@ -638,6 +638,17 @@
             color: var(--accent);
         }
 
+        .folder-icon-blue {
+            width: 56px;
+            height: 56px;
+            background: rgba(14, 165, 233, 0.1);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--primary);
+        }
+
         /* --- BOTTOM NAV --- */
         .bottom-nav-container {
             position: fixed;
@@ -962,7 +973,7 @@
         <section id="page-kelompok" class="page">
             <div class="page-header">
                 <button class="btn-back" onclick="handleBack()"><i data-lucide="arrow-left" width="20"></i></button>
-                <h2>Data Kelompok</h2>
+                <h2 id="kelompok-page-title">Data Kelompok</h2>
             </div>
             <div id="list-kelompok-container">
                 <p style="text-align:center; color:var(--text-muted);">Memuat data kelompok...</p>
@@ -1014,6 +1025,8 @@
 
     <script>
         // --- CONFIGURATION ---
+        const isDev = true; // Mode development (disable cache SW, percepat splash)
+
         const CONFIG = {
             csvUrl: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRcV7ShJedcvyA34Z0oqOIvcuII4YV0ANqbotmUPrrQt3wtVGBXXhTfiChoBXFykv5nEsYqFHsvEVjm/pub?output=csv",
             sheets: { jadwal: "0", tugas: "1114482467", materi: "1446941326", kelompok: "702392331" }
@@ -1026,6 +1039,8 @@
         let pageStack = ['page-home']; // Tracks navigation history
         let isViewingMateriFiles = false; // Tracks if we are inside a materi folder
         let currentSemester = '1';
+        let isViewingKelompokGroups = false;
+        let currentKelompokMatkul = '';
 
         // --- INITIALIZATION ---
         const splash = document.getElementById('splash-screen');
@@ -1049,11 +1064,11 @@
                 document.querySelector('script[src*="lucide"]').addEventListener('load', initLucideAndApp);
             }
 
-            // Sembunyikan splash setelah minimal 2500ms agar GIF selesai berputar
+            // Sembunyikan splash setelah minimal 2500ms agar GIF selesai berputar (atau 500ms jika dev)
             setTimeout(() => {
                 splash.style.opacity = '0';
                 setTimeout(() => splash.style.visibility = 'hidden', 300);
-            }, 2500);
+            }, isDev ? 500 : 2500);
         });
 
         // --- DATA FETCHING ---
@@ -1074,7 +1089,7 @@
 
             updateLoadingStatus("Memuat Kelompok...");
             db.kelompok = await fetchData(CONFIG.sheets.kelompok);
-            renderKelompokList();
+            loadKelompokFolders();
 
             updateLoadingStatus("Siap!");
             if (typeof lucide !== 'undefined') lucide.createIcons();
@@ -1084,27 +1099,100 @@
             if (loadingText) loadingText.innerText = txt;
         }
 
-        async function fetchData(gid) {
-            try {
-                const res = await fetch(`${CONFIG.csvUrl}&gid=${gid}&t=${new Date().getTime()}`);
-                if (!res.ok) throw new Error('Network response was not ok');
-                const text = await res.text();
-                return parseCSV(text);
-            } catch (e) {
-                console.error("Fetch error:", e);
-                return [];
+        /**
+         * Mengambil data CSV dari url secara asynchronous
+         * Termasuk retry mechanism dan penanganan timeout/jaringan yang lebih robust
+         * mencegah terjadinya infinite loading bila jaringan putus.
+         */
+        async function fetchData(gid, retries = 3) {
+            const url = `${CONFIG.csvUrl}&gid=${gid}&t=${new Date().getTime()}`;
+            for (let i = 0; i < retries; i++) {
+                try {
+                    // Gunakan controller untuk mencegah request menggantung (Timeout 10 detik)
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                    const res = await fetch(url, {
+                        cache: 'no-store',
+                        signal: controller.signal
+                    });
+
+                    clearTimeout(timeoutId);
+
+                    if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+
+                    const text = await res.text();
+                    if (!text || text.trim() === '') throw new Error('Response kosong dari server');
+
+                    return parseCSV(text);
+                } catch (e) {
+                    console.warn(`Fetch error pada percobaan ke-${i + 1} untuk gid ${gid}:`, e.message);
+                    if (i === retries - 1) {
+                        console.error('Gagal mengambil data setelah beberapa kali percobaan.');
+                        return []; // Fallback array kosong agar tidak terjadi error fatal
+                    }
+                    // Jeda sejenak sebelum mencoba ulang fetch (1s, 2s)
+                    await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+                }
             }
+            return [];
         }
 
+        /**
+         * Parsing raw Text CSV menjadi Array of Objects
+         * Cukup robust untuk menelan delimiter koma serta quoted multiple lines.
+         */
         function parseCSV(text) {
-            const rows = text.split(/\r?\n/).filter(r => r.trim() !== '');
-            if (rows.length < 1) return [];
-            // Regex handles commas inside quotes
-            const headers = rows[0].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(h => h.trim().replace(/^"|"$/g, ''));
-            return rows.slice(1).map(row => {
-                const values = row.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(v => v.trim().replace(/^"|"$/g, ''));
+            const rows = [];
+            let currentRow = [];
+            let currentCell = '';
+            let inQuotes = false;
+
+            for (let i = 0; i < text.length; i++) {
+                const char = text[i];
+
+                if (char === '"') {
+                    if (inQuotes && text[i + 1] === '"') {
+                        // Escaped quote
+                        currentCell += '"';
+                        i++; // Skip the next quote
+                    } else {
+                        // Toggle quotes
+                        inQuotes = !inQuotes;
+                    }
+                } else if (char === ',' && !inQuotes) {
+                    // End of cell
+                    currentRow.push(currentCell);
+                    currentCell = '';
+                } else if (char === '\n' && !inQuotes) {
+                    // End of row
+                    currentRow.push(currentCell);
+                    rows.push(currentRow);
+                    currentRow = [];
+                    currentCell = '';
+                } else if (char === '\r' && !inQuotes) {
+                    // Ignore \r if outside quotes
+                } else {
+                    currentCell += char;
+                }
+            }
+
+            // Push the last cell/row
+            currentRow.push(currentCell);
+            if (currentRow.length > 0 && currentRow.join('').trim() !== '') {
+                rows.push(currentRow);
+            }
+
+            // Filter empty rows
+            const validRows = rows.filter(r => r.join('').trim() !== '');
+            if (validRows.length < 1) return [];
+
+            const headers = validRows[0].map(h => h.trim());
+            return validRows.slice(1).map(row => {
                 let obj = {};
-                headers.forEach((h, i) => { obj[h] = values[i] || ''; });
+                headers.forEach((h, idx) => {
+                    obj[h] = row[idx] ? row[idx].trim() : '';
+                });
                 return obj;
             });
         }
@@ -1123,6 +1211,14 @@
                 document.getElementById('materi-filters').style.display = 'flex';
                 document.getElementById('materi-page-title').innerText = 'Arsip Materi';
                 loadMateriFolders(currentSemester);
+            }
+
+            // Reset Kelompok view state
+            if (pageId !== 'page-kelompok') {
+                isViewingKelompokGroups = false;
+            } else if (!isViewingKelompokGroups) {
+                document.getElementById('kelompok-page-title').innerText = 'Data Kelompok';
+                loadKelompokFolders();
             }
 
             // Update Bottom Nav
@@ -1157,6 +1253,14 @@
                 document.getElementById('materi-filters').style.display = 'flex';
                 document.getElementById('materi-page-title').innerText = 'Arsip Materi';
                 loadMateriFolders(currentSemester);
+                return;
+            }
+
+            // Priority: If inside Kelompok Folder (Group View) -> Go back to Folder Grid
+            if (isViewingKelompokGroups) {
+                isViewingKelompokGroups = false;
+                document.getElementById('kelompok-page-title').innerText = 'Data Kelompok';
+                loadKelompokFolders();
                 return;
             }
 
@@ -1220,29 +1324,69 @@
             }
         }
 
-        function parseIndoDate(dateStr) {
+        function parseIndoDateTime(dateStr, timeStr) {
             if (!dateStr) return new Date(8640000000000000);
             const months = { "januari": 0, "jan": 0, "februari": 1, "feb": 1, "maret": 2, "mar": 2, "april": 3, "apr": 3, "mei": 4, "juni": 5, "jun": 5, "juli": 6, "jul": 6, "agustus": 7, "agu": 7, "september": 8, "sep": 8, "oktober": 9, "okt": 9, "november": 10, "nov": 10, "desember": 11, "des": 11 };
 
-            let d = new Date(dateStr);
-            if (!isNaN(d)) return d;
+            // Bersihkan format hari jika ada (misal "Min, ")
+            let cleanDateStr = dateStr.replace(/^[a-zA-Z]+,\s*/, '');
+            let parts = cleanDateStr.toLowerCase().split(/[\s/-]+/);
 
-            let parts = dateStr.toLowerCase().split(/[\s/-]+/);
+            let parsedDate = null;
             if (parts.length >= 3) {
                 let day = parseInt(parts[0]);
                 let monthStr = parts[1];
                 let year = parseInt(parts[2]);
                 let month = months[monthStr] !== undefined ? months[monthStr] : parseInt(monthStr) - 1;
+
                 if (!isNaN(day) && !isNaN(month) && !isNaN(year)) {
-                    return new Date(year, month, day);
+                    parsedDate = new Date(year, month, day);
                 }
             }
-            return new Date(8640000000000000);
+
+            if (!parsedDate) {
+                let d = new Date(cleanDateStr);
+                if (!isNaN(d)) parsedDate = d;
+                else parsedDate = new Date(8640000000000000);
+            }
+
+            if (timeStr && parsedDate.getTime() !== 8640000000000000) {
+                let timeParts = timeStr.split('.');
+                if (timeParts.length >= 2) {
+                    parsedDate.setHours(parseInt(timeParts[0]), parseInt(timeParts[1]), 0);
+                }
+            } else if (parsedDate.getTime() !== 8640000000000000) {
+                parsedDate.setHours(23, 59, 59); // Default end of day
+            }
+
+            return parsedDate;
         }
 
         function getSortedActiveTasks() {
-            const activeTasks = db.tugas.filter(t => t.STATUS && t.STATUS.toLowerCase() === 'aktif');
-            return activeTasks.sort((a, b) => parseIndoDate(a.DEADLINE) - parseIndoDate(b.DEADLINE));
+            // Urutkan berdasarkan deadline terdekat (tidak mengandalkan STATUS Aktif lagi karena sheet berubah)
+            const validTasks = db.tugas.filter(t => t['MATA KULIAH'] && t['DEADLINE']);
+            return validTasks.sort((a, b) => parseIndoDateTime(a.DEADLINE, a.JAM) - parseIndoDateTime(b.DEADLINE, b.JAM));
+        }
+
+        function getTaskCountdown(deadlineDate) {
+            const now = new Date();
+            const diffTime = deadlineDate - now;
+            const diffDays = diffTime / (1000 * 60 * 60 * 24);
+
+            if (diffDays < 0) {
+                return { text: 'Sudah Lewat', color: 'var(--text-muted)' };
+            } else if (diffDays < 1) {
+                const diffHours = Math.floor(diffTime / (1000 * 60 * 60));
+                if (diffHours < 1) {
+                    const diffMins = Math.floor(diffTime / (1000 * 60));
+                    return { text: `${diffMins} Menit Lagi`, color: '#d63031' };
+                }
+                return { text: `${diffHours} Jam Lagi`, color: '#d63031' };
+            } else if (diffDays <= 3) {
+                return { text: `${Math.ceil(diffDays)} Hari Lagi`, color: '#e67e22' };
+            } else {
+                return { text: `${Math.ceil(diffDays)} Hari Lagi`, color: 'var(--primary)' };
+            }
         }
 
         function updateHomeTaskCount() {
@@ -1254,14 +1398,16 @@
             if (previewEl) {
                 if (activeTasks.length > 0) {
                     const nearest = activeTasks[0];
+                    const deadlineDate = parseIndoDateTime(nearest.DEADLINE, nearest.JAM);
+                    const countdown = getTaskCountdown(deadlineDate);
                     previewEl.innerHTML = `
                         <div style="background: var(--bg-subtle); padding: 10px 14px; border-radius: var(--radius-md); display:flex; gap:12px; align-items:center;">
-                            <div style="background:var(--bg-card); width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow-sm); color:var(--danger); flex-shrink:0;">
+                            <div style="background:var(--bg-card); width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow-sm); color:${countdown.color}; flex-shrink:0;">
                                 <i data-lucide="clock" width="18"></i>
                             </div>
                             <div style="flex:1; overflow:hidden; text-align:left;">
                                 <div style="font-size:0.85rem; font-weight:700; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; color:var(--text-main);">${nearest['MATA KULIAH']}</div>
-                                <div style="font-size:0.75rem; color:var(--danger); font-weight:700; margin-top:2px;">DL: ${nearest.DEADLINE}</div>
+                                <div style="font-size:0.75rem; color:${countdown.color}; font-weight:700; margin-top:2px;">${countdown.text} (${nearest.DEADLINE})</div>
                             </div>
                         </div>
                     `;
@@ -1328,19 +1474,50 @@
                 </div>`;
                 return;
             }
-            activeTasks.forEach(item => {
-                container.innerHTML += `
-                <div class="list-card task-card">
-                    <div class="list-info">
-                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
-                            <h4 class="list-title">${item['MATA KULIAH']}</h4>
-                            <span class="task-deadline">DL: ${item.DEADLINE}</span>
+            activeTasks.forEach((item, index) => {
+                const deadlineDate = parseIndoDateTime(item.DEADLINE, item.JAM);
+                const countdown = getTaskCountdown(deadlineDate);
+                const timeStr = item.JAM ? ` • ${item.JAM}` : '';
+
+                const descText = item['DESKRIPSI TUGAS'] ? item['DESKRIPSI TUGAS'].replace(/\n/g, '<br/>') : '';
+
+                let descHtml = '';
+                if (descText) {
+                    descHtml = `
+                    <div class="task-desc-container" style="background:var(--bg-subtle); border-radius:8px; padding:10px; margin-bottom:12px; cursor:pointer;" onclick="const b = this.querySelector('.task-desc-body'); const i = this.querySelector('.chevron-icon'); if(b.style.display === 'none'){ b.style.display='block'; i.style.transform='rotate(180deg)'; } else { b.style.display='none'; i.style.transform='rotate(0deg)'; }">
+                        <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.85rem; font-weight:600; color:var(--text-muted);">
+                            <span><i data-lucide="align-left" width="14" style="margin-right:6px; vertical-align:middle;"></i>Deskripsi Tugas</span>
+                            <i data-lucide="chevron-down" width="16" class="chevron-icon" style="transition: transform 0.2s;"></i>
                         </div>
-                        <p style="font-size:0.9rem; color:var(--text-main); margin-bottom:12px; line-height:1.4;">${item['JUDUL TUGAS']}</p>
-                        <a href="${item['LINK PENGUMPULAN']}" target="_blank" class="btn-submit">
-                            Kumpulkan Tugas <i data-lucide="external-link" width="14"></i>
-                        </a>
+                        <div class="task-desc-body" style="display:none; margin-top:10px; padding-top:10px; border-top:1px solid var(--border-light); font-size:0.85rem; color:var(--text-main); line-height:1.5;">
+                            ${descText}
+                        </div>
                     </div>
+                    `;
+                }
+
+                container.innerHTML += `
+                <div class="list-card task-card" style="flex-direction: column;">
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; width:100%; margin-bottom:4px;">
+                        <h4 class="list-title" style="margin-bottom:0;">${item['MATA KULIAH']}</h4>
+                        <div style="text-align: right; min-width:80px;">
+                            <span style="font-size:0.75rem; font-weight:700; color:${countdown.color}; background:rgba(0,0,0,0.03); padding:4px 8px; border-radius:6px; display:inline-block;">${countdown.text}</span>
+                        </div>
+                    </div>
+                    
+                    <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom:10px; display:flex; align-items:center; gap:4px;">
+                        <i data-lucide="calendar" width="12"></i> ${item.DEADLINE}${timeStr}
+                    </div>
+
+                    <div style="font-size:0.95rem; font-weight:600; color:var(--text-main); margin-bottom:12px; line-height:1.4;">
+                        ${item['JUDUL TUGAS']}
+                    </div>
+                    
+                    ${descHtml}
+                    
+                    <a href="${item['LINK PENGUMPULAN']}" target="_blank" class="btn-submit" style="align-self: flex-start; margin-top:0;">
+                        Kumpulkan Tugas <i data-lucide="external-link" width="14"></i>
+                    </a>
                 </div>`;
             });
         }
@@ -1423,28 +1600,120 @@
             document.getElementById('main-content').scrollTop = 0;
         }
 
-        // --- PAGE: KELOMPOK ---
-        function renderKelompokList() {
+        // --- PAGE: KELOMPOK (FOLDERS & GROUPS) ---
+        function loadKelompokFolders() {
+            isViewingKelompokGroups = false;
+            document.getElementById('kelompok-page-title').innerText = 'Data Kelompok';
+
             const container = document.getElementById('list-kelompok-container');
-            container.innerHTML = '';
-            if (db.kelompok.length === 0) {
-                container.innerHTML = '<p style="text-align:center; color:var(--text-muted); margin-top:20px;">Data kelompok belum tersedia.</p>';
-                return;
-            }
-            db.kelompok.forEach(item => {
-                if (!item['Mata Kuliah']) return;
-                container.innerHTML += `
-                <div class="list-card" style="flex-direction:column; gap:10px;">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <i data-lucide="users" width="18" color="var(--primary)"></i>
-                        <h4 style="color:var(--primary); font-size:0.95rem; font-weight:700;">${item['Mata Kuliah']}</h4>
+            container.innerHTML = '<p style="text-align:center; color:var(--text-muted); margin-top:20px;">Memuat folder...</p>';
+
+            setTimeout(() => {
+                if (db.kelompok.length === 0) {
+                    container.innerHTML = `
+                    <div style="text-align:center; padding:40px 20px; color:var(--text-muted); display:flex; flex-direction:column; align-items:center; gap:10px;">
+                        <i data-lucide="users" width="40" color="var(--border-light)"></i>
+                        <p style="font-weight:600; font-size:0.95rem;">Data kelompok belum tersedia.</p>
+                        <p style="font-size:0.8rem; background:var(--bg-main); padding:12px; border-radius:10px; margin-top:10px; text-align:left; border: 1px solid var(--border-light);">
+                            <b>💡 Cara Mengisi Sheet Kelompok:</b><br /><br />
+                            <b>1. Mata Kuliah</b>: Misal "Pemrograman Web"<br />
+                            <b>2. Kelompok</b>: Misal "Kelompok 1"<br />
+                            <b>3. Anggota</b>: Misal "Budi" atau "Budi, Andi"<br /><br />
+                            <i>*Anda bisa menambahkan anggota baru di bawah baris sebelumnya dengan nama kelompok yang sama. Sistem akan menggabungkannya secara otomatis!</i>
+                        </p>
+                    </div>`;
+                    if (typeof lucide !== 'undefined') lucide.createIcons();
+                    return;
+                }
+
+
+                let html = '';
+
+                const uniqueMatkul = [...new Set(db.kelompok.map(item => (item['Mata Kuliah'] || '').trim()))].filter(Boolean);
+
+                html += '<div class="folder-grid">';
+                uniqueMatkul.forEach(matkul => {
+                    const kelompokRows = db.kelompok.filter(m => (m['Mata Kuliah'] || '').trim() === matkul);
+                    const uniqueKelompok = [...new Set(kelompokRows.map(k => (k['Kelompok'] || 'Tanpa Kelompok').trim()))].filter(Boolean);
+                    const count = uniqueKelompok.length;
+                    const safeMatkul = matkul.replace(/'/g, "\\'");
+                    html += `
+                    <div class="folder-item" onclick="openMatkulKelompok('${safeMatkul}')">
+                        <div class="folder-icon-blue"><i data-lucide="users" width="28"></i></div>
+                        <div style="font-weight:700; font-size:0.85rem; line-height:1.3;">${matkul}</div>
+                        <div style="font-size:0.75rem; color:var(--text-muted);">${count} Kelompok</div>
+                    </div>`;
+                });
+                html += '</div>';
+                container.innerHTML = html;
+                if (typeof lucide !== 'undefined') lucide.createIcons();
+            }, 100);
+        }
+
+        function openMatkulKelompok(matkul) {
+            isViewingKelompokGroups = true;
+            currentKelompokMatkul = matkul;
+            document.getElementById('kelompok-page-title').innerText = matkul;
+
+            const container = document.getElementById('list-kelompok-container');
+            const rows = db.kelompok.filter(m => (m['Mata Kuliah'] || '').trim() === matkul);
+
+            // Logic: Group anggota by Kelompok name
+            const kelompokMap = {};
+            rows.forEach(row => {
+                const kelName = (row['Kelompok'] || 'Tanpa Kelompok').trim();
+                const anggota = (row['Anggota'] || '').trim();
+
+                if (!kelompokMap[kelName]) {
+                    kelompokMap[kelName] = [];
+                }
+
+                if (anggota) {
+                    // Coba pisah line breaks atau koma jika user menggabungnya
+                    const listAnggota = anggota.split(/\n|,/).map(a => a.trim()).filter(a => a);
+                    kelompokMap[kelName].push(...listAnggota);
+                }
+            });
+
+            // Clean unique array (in case of duplicate member input accidentally)
+            Object.keys(kelompokMap).forEach(k => {
+                kelompokMap[k] = [...new Set(kelompokMap[k])];
+            });
+
+            const keys = Object.keys(kelompokMap);
+            // Urutkan kelompok secara natural (Kelompok 1, Kelompok 2, dll)
+            keys.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+            let html = `<div style="padding-bottom:12px; font-size:0.85rem; color:var(--text-muted); font-weight:600; text-transform:uppercase; letter-spacing:0.5px;">📋 ${keys.length} kelompok ditemukan</div>`;
+
+            keys.forEach(kelName => {
+                const listAnggotaHtml = kelompokMap[kelName].length > 0
+                    ? kelompokMap[kelName].map((nama, idx) => `
+                      <div style="display:flex; align-items:flex-start; gap:8px; margin-bottom:8px;">
+                          <div style="background:var(--bg-main); border: 1px solid var(--border-light); border-radius:6px; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:0.7rem; font-weight:700; color:var(--text-muted); flex-shrink:0; margin-top:2px;">
+                              ${idx + 1}
+                          </div>
+                          <span style="color:var(--text-main); font-size:0.9rem; font-weight:600;">${nama}</span>
+                      </div>`).join('')
+                    : '<div style="color:var(--text-muted); font-size:0.85rem; font-style:italic;">Belum ada anggota yang terdaftar di kelompok ini.</div>';
+
+                html += `
+                <div class="list-card" style="flex-direction:column; gap:12px; padding:18px; border:1px solid #E2E8F0; box-shadow:0 4px 15px -5px rgba(0,0,0,0.05); margin-bottom:16px;">
+                    <div style="display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--border-light); padding-bottom:12px;">
+                        <div style="background:linear-gradient(135deg, var(--primary), var(--primary-dark)); color:white; width:40px; height:40px; border-radius:12px; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 10px rgba(14,165,233,0.2);">
+                            <i data-lucide="users" width="22"></i>
+                        </div>
+                        <h4 style="color:var(--text-main); font-size:1.1rem; font-weight:800; margin:0;">${kelName}</h4>
                     </div>
-                    <div style="background:var(--bg-subtle); padding:12px; border-radius:10px;">
-                        <span style="font-weight:700; font-size:0.9rem; display:block; margin-bottom:6px;">${item['Nama Kelompok']}</span>
-                        <p style="font-size:0.85rem; color:var(--text-muted); line-height:1.5; white-space: pre-line;">${item['Daftar Anggota']}</p>
+                    <div style="padding-top:4px;">
+                        ${listAnggotaHtml}
                     </div>
                 </div>`;
             });
+
+            container.innerHTML = html;
+            if (typeof lucide !== 'undefined') lucide.createIcons();
+            document.getElementById('main-content').scrollTop = 0;
         }
 
         // --- DOC VIEWER ---
@@ -1526,14 +1795,39 @@
             isPulling = false;
         });
         // Register Service Worker untuk PWA
-        if ('serviceWorker' in navigator) {
+        if (!isDev && 'serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('sw.js').then(reg => {
                     console.log('PWA Ready!');
+
+                    // Reliable Update Logic: Mendeteksi saat ada file sw.js baru yang terinstall
+                    reg.addEventListener('updatefound', () => {
+                        const newWorker = reg.installing;
+                        newWorker.addEventListener('statechange', () => {
+                            // Cek bila service worker baru selesai install dan ini bukan instalasi pertama kali
+                            if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                // Tampilkan notifikasi atau pop-up alert yang force reload cache
+                                if (confirm('Versi terbaru dari E&F Class telah tersedia! Klik OK untuk memuat ulang.')) {
+                                    window.location.reload();
+                                }
+                            }
+                        });
+                    });
+
                 }).catch(err => {
                     console.log('PWA Error', err);
                 });
             });
+        } else if (isDev) {
+            console.log('Development mode: Service Worker tidak diregistrasi untuk mencegah caching.');
+            // Hapus unregister Service Worker yang mungkin sudah aktif sebelumnya
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.getRegistrations().then(function (registrations) {
+                    for (let registration of registrations) {
+                        registration.unregister();
+                    }
+                });
+            }
         }
 
     </script>
